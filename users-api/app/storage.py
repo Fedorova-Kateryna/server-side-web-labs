@@ -1,72 +1,76 @@
-from datetime import datetime, UTC
 from pwdlib import PasswordHash
+from sqlalchemy import select
+from . import models
 
 password_hash = PasswordHash.recommended()
 
 class EmailTakenError(Exception):
-    def __init__(self, message, error_code):
-        super().__init__(message)
-        self.error_code = error_code
-        self.message = message
+    pass
 
-    def __str__(self):
-        return f'{self.error_code}: {self.message}'
 
-users = {}
+async def check_unique_email(session, email: str, exclude_user_id: int = None):
+    if exclude_user_id is not None:
+        result = await session.scalars(select(models.User).where(models.User.id != exclude_user_id, models.User.email == email.lower()))
+    else:
+        result = await session.scalars(select(models.User).where(models.User.email == email.lower()))
+    if result.first() is not None:
+        raise EmailTakenError("Email already registered", 409)
 
-next_id = 1
-
-def check_unique_email(email: str, exclude_user_id: int = None):
-    for user in users.values():
-        if user['email'].lower() == email.lower() and user['id'] != exclude_user_id:
-            raise EmailTakenError("Email already registered", 409)
-
-async def create_user(data):
-    global next_id
-    current_id = next_id
+async def create_user(session, data):
     user_info = data.model_dump(exclude={"password"})
-    check_unique_email(user_info["email"])
-    user_info['id'] = current_id
-    user_info['created_at'] = datetime.now(UTC)
-    user_info['password_hash'] = password_hash.hash(data.password)
-    users[current_id] = user_info
-    next_id += 1
-    return users[current_id]
+    await check_unique_email(session, user_info["email"])
+    user = models.User(**user_info)
+    user.password_hash = password_hash.hash(data.password)
+    user.email = data.email.lower()
+    session.add(user)
+    await session.commit()
+    await session.refresh(user)
+    return user
 
-async def get_users():
-    return list(users.values())
+async def get_users(session):
+    result = await session.scalars(select(models.User).order_by(models.User.id))
+    return result.all()
 
-async def get_user_by_id(user_id: int):
-    return users.get(user_id)
+async def get_user_by_id(session, user_id: int):
+    result = await session.scalars(select(models.User).where(models.User.id == user_id))
+    return result.first()
 
-async def update_user(user_id: int, user):
-    current_user = users.get(user_id)
+async def update_user(session, user_id: int, user):
+    current_user = await get_user_by_id(session, user_id)
     if current_user is None:
         return None
     modified_data = user.model_dump(exclude_unset=True, exclude={"password"})
     if 'email' in modified_data:
-        check_unique_email(modified_data["email"], user_id)
+        await check_unique_email(session, modified_data["email"], user_id)
+        modified_data['email'] = user.email.lower()
     if user.password is not None:
-        current_user['password_hash'] = password_hash.hash(user.password)
-    current_user.update(modified_data)
-    return users[user_id]
+        modified_data['password_hash'] = password_hash.hash(user.password)
+    for key, value in modified_data.items():
+        setattr(current_user, key, value)
 
-async def replace_user(user_id: int, user):
-    current_user = users.get(user_id)
+    await session.commit()
+    await session.refresh(current_user)
+    return current_user
+
+async def replace_user(session, user_id: int, user):
+    current_user = await get_user_by_id(session, user_id)
     if current_user is None:
         return None
 
     updated_keys = user.model_dump(exclude={"password"})
-    check_unique_email(updated_keys['email'], user_id)
-    current_user['password_hash'] = password_hash.hash(user.password)
-    for key in current_user:
-        if key in updated_keys:
-            current_user[key] = updated_keys[key]
-    return users[user_id]
+    await check_unique_email(session, updated_keys['email'], user_id)
+    updated_keys['password_hash'] = password_hash.hash(user.password)
+    updated_keys['email'] = user.email.lower()
+    for key, value in updated_keys.items():
+        setattr(current_user, key, value)
+    await session.commit()
+    await session.refresh(current_user)
+    return current_user
 
-async def delete_user(user_id: int):
-    try:
-        users.pop(user_id)
-        return True
-    except KeyError:
+async def delete_user(session, user_id: int):
+    current_user = await get_user_by_id(session, user_id)
+    if current_user is None:
         return False
+    await session.delete(current_user)
+    await session.commit()
+    return True

@@ -2,3 +2,7 @@ fastapi[standard]
 uvicorn[standard]
 email-validator
 pwdlib[argon2]
+sqlalchemy[asyncio]
+asyncpg
+alembic
+pydantic-settings
